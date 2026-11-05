@@ -11,7 +11,6 @@
     <PackageReference Include="ModelContextProtocol" Version="2.3.1" />
     <PackageReference Include="MessagePack" Version="2.5.307" />
     <PackageReference Include="Microsoft.Agents.AI.GithubCopilot" Version="1.0.0-preview.260127.1" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="10.0.14" />
     <PackageReference Include="Nerdbank.MessagePack" Version="1.4.95" />
   </ItemGroup>
 
