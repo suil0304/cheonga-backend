@@ -23,6 +23,12 @@ if (!useMockData)
     throw new InvalidOperationException("No verified education data provider is configured.");
 }
 
+var mcpEndpointValue = builder.Configuration["Mcp:Endpoint"];
+if (!Uri.TryCreate(mcpEndpointValue, UriKind.Absolute, out var mcpEndpoint))
+{
+    throw new InvalidOperationException("Mcp:Endpoint must be an absolute MCP server URL.");
+}
+
 builder.Services
     .AddAuthentication(options =>
     {
@@ -64,7 +70,8 @@ if (googleLoginConfigured)
 
 builder.Services.AddAuthorization();
 builder.Services.AddAntiforgery(options => options.HeaderName = "X-CSRF-TOKEN");
-builder.Services.AddSingleton<IEducationMaterialProvider, MockEducationMaterialProvider>();
+builder.Services.AddSingleton<IEducationMaterialProvider>(
+    new McpEducationMaterialProvider(mcpEndpoint));
 builder.Services.AddSingleton<IGuidanceAgent, CopilotGuidanceAgent>();
 builder.Services.AddSingleton<GuidanceService>();
 
@@ -91,7 +98,7 @@ app.MapGet("/auth/login", (IConfiguration configuration) =>
     }
 
     return Results.Challenge(
-        new Microsoft.AspNetCore.Authentication.AuthenticationProperties { RedirectUri = "/" },
+        new Microsoft.AspNetCore.Authentication.AuthenticationProperties { RedirectUri = "/?signedIn=1" },
         [OpenIdConnectDefaults.AuthenticationScheme]);
 }).AllowAnonymous();
 
