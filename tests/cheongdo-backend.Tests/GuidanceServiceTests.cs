@@ -5,6 +5,21 @@ namespace cheongdo_backend.Tests;
 public sealed class GuidanceServiceTests
 {
     [Fact]
+    public void GuestSessionRequiresCurrentExplicitConsent()
+    {
+        Assert.Null(GuestSession.CreatePrincipal(false, GuestSession.ConsentVersion));
+        Assert.Null(GuestSession.CreatePrincipal(true, "outdated-version"));
+
+        var principal = GuestSession.CreatePrincipal(true, GuestSession.ConsentVersion);
+
+        Assert.NotNull(principal);
+        Assert.Equal("guest", principal.FindFirst("login_type")?.Value);
+        Assert.Equal(GuestSession.ConsentVersion, principal.FindFirst("consent_version")?.Value);
+        Assert.False(string.IsNullOrWhiteSpace(principal.FindFirst(
+            System.Security.Claims.ClaimTypes.NameIdentifier)?.Value));
+    }
+
+    [Fact]
     public async Task MockProviderReturnsClearlyMarkedMatchingMaterial()
     {
         var provider = new MockEducationMaterialProvider();

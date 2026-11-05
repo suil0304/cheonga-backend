@@ -1,16 +1,12 @@
-using System.Security.Claims;
 using cheongdo_backend.Guidance;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
-using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Antiforgery;
+
+const string ConsentedGuestPolicy = "ConsentedGuest";
 
 var builder = WebApplication.CreateBuilder(args);
 
-var googleClientId = builder.Configuration["Google:ClientId"];
-var googleClientSecret = builder.Configuration["Google:ClientSecret"];
-var googleLoginConfigured = !string.IsNullOrWhiteSpace(googleClientId)
-    && !string.IsNullOrWhiteSpace(googleClientSecret);
 var useMockData = builder.Configuration.GetValue("Data:UseMock", true);
 
 if (builder.Environment.IsProduction() && useMockData)
@@ -34,9 +30,6 @@ builder.Services
     {
         options.DefaultAuthenticateScheme = CookieAuthenticationDefaults.AuthenticationScheme;
         options.DefaultSignInScheme = CookieAuthenticationDefaults.AuthenticationScheme;
-        options.DefaultChallengeScheme = googleLoginConfigured
-            ? OpenIdConnectDefaults.AuthenticationScheme
-            : CookieAuthenticationDefaults.AuthenticationScheme;
     })
     .AddCookie(options =>
     {
@@ -44,31 +37,22 @@ builder.Services
         options.Cookie.HttpOnly = true;
         options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
         options.Cookie.SameSite = SameSiteMode.Lax;
-        options.LoginPath = "/auth/login";
+        options.ExpireTimeSpan = TimeSpan.FromHours(8);
         options.SlidingExpiration = false;
+        options.Events.OnRedirectToLogin = context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return Task.CompletedTask;
+        };
     });
 
-if (googleLoginConfigured)
+builder.Services.AddAuthorization(options =>
 {
-    builder.Services.AddAuthentication()
-        .AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme, options =>
-        {
-            options.Authority = "https://accounts.google.com";
-            options.ClientId = googleClientId!;
-            options.ClientSecret = googleClientSecret!;
-            options.ResponseType = "code";
-            options.UsePkce = true;
-            options.SaveTokens = false;
-            options.GetClaimsFromUserInfoEndpoint = true;
-            options.Scope.Clear();
-            options.Scope.Add("openid");
-            options.Scope.Add("profile");
-            options.ClaimActions.MapUniqueJsonKey(ClaimTypes.Name, "name");
-            options.TokenValidationParameters.NameClaimType = ClaimTypes.Name;
-        });
-}
-
-builder.Services.AddAuthorization();
+    options.AddPolicy(ConsentedGuestPolicy, policy =>
+        policy.RequireAuthenticatedUser()
+            .RequireClaim(GuestSession.LoginTypeClaim, GuestSession.LoginType)
+            .RequireClaim(GuestSession.ConsentVersionClaim, GuestSession.ConsentVersion));
+});
 builder.Services.AddAntiforgery(options => options.HeaderName = "X-CSRF-TOKEN");
 builder.Services.AddSingleton<IEducationMaterialProvider>(
     new McpEducationMaterialProvider(mcpEndpoint));
@@ -85,28 +69,64 @@ app.UseAntiforgery();
 app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }))
     .AllowAnonymous();
 
-app.MapGet("/auth/login", (IConfiguration configuration) =>
+app.MapGet("/api/v1/session", (HttpContext context) =>
 {
-    var clientId = configuration["Google:ClientId"];
-    var clientSecret = configuration["Google:ClientSecret"];
-    if (string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(clientSecret))
-    {
-        return Results.Problem(
-            title: "Google 로그인 설정이 필요합니다.",
-            detail: "Google:ClientId와 Google:ClientSecret을 서버 환경 변수로 설정하세요.",
-            statusCode: StatusCodes.Status503ServiceUnavailable);
-    }
-
-    return Results.Challenge(
-        new Microsoft.AspNetCore.Authentication.AuthenticationProperties { RedirectUri = "/?signedIn=1" },
-        [OpenIdConnectDefaults.AuthenticationScheme]);
+    var isAuthenticated = context.User.Identity?.IsAuthenticated == true
+        && context.User.HasClaim(GuestSession.LoginTypeClaim, GuestSession.LoginType)
+        && context.User.HasClaim(GuestSession.ConsentVersionClaim, GuestSession.ConsentVersion);
+    return Results.Ok(new { authenticated = isAuthenticated });
 }).AllowAnonymous();
 
 app.MapGet("/api/v1/antiforgery", (HttpContext context, IAntiforgery antiforgery) =>
 {
     var tokens = antiforgery.GetAndStoreTokens(context);
     return Results.Ok(new { requestToken = tokens.RequestToken });
-}).RequireAuthorization();
+}).AllowAnonymous();
+
+app.MapPost("/auth/guest", async (
+    HttpContext context,
+    IAntiforgery antiforgery,
+    GuestLoginRequest request) =>
+{
+    if (!await antiforgery.IsRequestValidAsync(context))
+    {
+        return Results.Problem(
+            title: "요청을 확인할 수 없습니다.",
+            detail: "유효한 CSRF 토큰이 필요합니다.",
+            statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    var principal = GuestSession.CreatePrincipal(request.ConsentAccepted, request.ConsentVersion);
+    if (principal is null)
+    {
+        return Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            [nameof(request.ConsentAccepted)] = ["현재 동의 안내를 확인하고 동의해야 게스트로 이용할 수 있습니다."]
+        });
+    }
+
+    await context.SignInAsync(
+        CookieAuthenticationDefaults.AuthenticationScheme,
+        principal,
+        new AuthenticationProperties { IsPersistent = false });
+    return Results.NoContent();
+}).AllowAnonymous();
+
+app.MapPost("/auth/logout", async (
+    HttpContext context,
+    IAntiforgery antiforgery) =>
+{
+    if (!await antiforgery.IsRequestValidAsync(context))
+    {
+        return Results.Problem(
+            title: "요청을 확인할 수 없습니다.",
+            detail: "유효한 CSRF 토큰이 필요합니다.",
+            statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+    return Results.NoContent();
+}).RequireAuthorization(ConsentedGuestPolicy);
 
 app.MapPost("/api/v1/guidance", async (
     HttpContext context,
@@ -142,7 +162,7 @@ app.MapPost("/api/v1/guidance", async (
     var result = await guidanceService.AnswerAsync(request, cancellationToken);
     return Results.Ok(result);
 })
-    .RequireAuthorization();
+    .RequireAuthorization(ConsentedGuestPolicy);
 
 app.Run();
 
