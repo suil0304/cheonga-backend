@@ -1,0 +1,12 @@
+bin/
+obj/
+**/bin/
+**/obj/
+.vs/
+.idea/
+.env
+.env.*
+!.env.example
+secrets.json
+*.user
+*.suo
